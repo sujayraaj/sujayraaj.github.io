@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>Unity WebGL Player | Ball Bouncer</title>
+    <link rel="shortcut icon" href="TemplateData/favicon.ico">
+    <link rel="stylesheet" href="TemplateData/style.css">
+    <script src="TemplateData/UnityProgress.js"></script>
+    <script src="Build/UnityLoader.js"></script>
+    <script>
+      var unityInstance = UnityLoader.instantiate("unityContainer", "Build/BallBouncerBuild.json", {onProgress: UnityProgress});
+      unityInstance.SetFullscreen(1)
+    </script>
+  </head>
+  <body>
+    <div class="webgl-content">
+      <div id="unityContainer" style="width: 320px; height: 640px;"></div>
+      <div class="footer">
+        <div class="webgl-logo"></div>
+        <div class="fullscreen" onclick="unityInstance.SetFullscreen(1)"></div>
+        <div class="title">Ball Bouncer</div>
+      </div>
+    </div>
+    <script>
+      const scale = window.innerWidth/document.querySelector('#unityContainer').getBoundingClientRect().width
+      document.querySelector('#unityContainer').style.transform = `scale(${scale}`
+    </script>
+    <style>
+      body,html {
+        margin:0;
+        padding:0;
+      }
+      #unityContainer {
+        margin: 0 auto !important;
+      }
+    </style>
+  </body>
+</html>
