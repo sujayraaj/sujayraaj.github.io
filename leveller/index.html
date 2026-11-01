@@ -61,6 +61,13 @@ button:focus-visible{outline:2px solid var(--vial);outline-offset:2px}
 #sheet{position:fixed;left:12px;right:12px;bottom:calc(env(safe-area-inset-bottom,0px) + 12px);background:#161c1a;border:1px solid var(--line);border-radius:16px;padding:16px;z-index:4;display:flex;flex-direction:column;gap:12px}
 #sheet p{margin:0;font-size:14px;color:var(--muted)}
 #sheet h2{margin:0;font-size:17px}
+#errbar{position:fixed;left:12px;right:12px;top:calc(env(safe-area-inset-top,0px) + 64px);z-index:20;background:#3a1512;border:1px solid var(--bad);color:var(--fg);border-radius:12px;padding:10px 12px;font-size:13.5px;text-align:left;font-weight:500;min-height:0}
+#diag{position:fixed;inset:0;z-index:30;background:rgba(0,0,0,.6);display:flex;align-items:flex-end;padding:12px max(12px,env(safe-area-inset-right,0px)) calc(env(safe-area-inset-bottom,0px) + 12px) max(12px,env(safe-area-inset-left,0px));touch-action:auto}
+#diag .box{background:#161c1a;border:1px solid var(--line);border-radius:16px;padding:16px;width:100%;display:flex;flex-direction:column;gap:10px;max-height:85%}
+#diag h2{margin:0;font-size:17px}
+#diag p{margin:0;font-size:13.5px;color:var(--muted)}
+#diag textarea{width:100%;flex:1;min-height:180px;font:12px/1.45 var(--mono);color:var(--fg);background:#0d1110;border:1px solid var(--line);border-radius:10px;padding:10px;resize:none;-webkit-user-select:text;user-select:text}
+.linkbtn{background:none;border:0;color:var(--muted);font:400 13px var(--sans);text-decoration:underline;text-underline-offset:3px;padding:8px;min-height:0}
 </style>
 </head>
 <body>
@@ -86,10 +93,92 @@ button:focus-visible{outline:2px solid var(--vial);outline-offset:2px}
     <button id="freezeBtn">Freeze</button>
     <button id="calBtn">Calibrate</button>
     <button id="resetBtn">Clear</button>
+    <button id="reportBtn" type="button">Report</button>
   </div>
 </div>
 
 <div id="sheet" hidden></div>
+
+<button id="errbar" type="button" hidden></button>
+<div id="diag" hidden>
+  <div class="box" role="dialog" aria-labelledby="diag-h">
+    <h2 id="diag-h">Report</h2>
+    <p>Copy this and send it to whoever is fixing the app. It contains your browser, permission states and what happened. No images or location.</p>
+    <textarea id="diag-text" readonly></textarea>
+    <div class="row"><button id="diag-copy" class="on" type="button">Copy</button><button id="diag-close" type="button">Close</button></div>
+  </div>
+</div>
+
+<script>
+/* On-page diagnostics. Runs before the app so it catches the app's own load errors too. */
+(() => {
+  const t0 = Date.now(), entries = [];
+  const fmt = v => { try { return typeof v === 'string' ? v : JSON.stringify(v); } catch { return String(v); } };
+  const log = (...a) => { entries.push('+' + ((Date.now()-t0)/1000).toFixed(1) + 's ' + a.map(fmt).join(' ')); if (entries.length > 200) entries.splice(1, 1); };
+  const el = id => document.getElementById(id);
+  function showBar(msg){
+    const b = el('errbar'); if (!b) return;
+    b.textContent = 'Error: ' + msg + ' (tap for report)'; b.hidden = false;
+  }
+  function fail(msg){ log('ERROR', msg); showBar(msg); }
+  window.addEventListener('error', e => {
+    if (e.target && e.target !== window && (e.target.src || e.target.href)) { log('resource failed', e.target.src || e.target.href); return; }
+    fail((e.message || 'script error') + (e.lineno ? ' @' + e.lineno + ':' + e.colno : ''));
+  }, true);
+  window.addEventListener('unhandledrejection', e => {
+    const r = e.reason; fail('unhandled ' + ((r && (r.name + ': ' + r.message)) || fmt(r)));
+  });
+
+  async function permState(name){
+    try { return (await navigator.permissions.query({name})).state; } catch { return 'n/a'; }
+  }
+  async function report(){
+    const v = el('cam'), st = v && v.srcObject, tr = st && st.getVideoTracks ? st.getVideoTracks()[0] : null;
+    let settings = null; try { settings = tr && tr.getSettings(); } catch {}
+    const lines = [
+      'Wall Leveller report ' + new Date().toISOString(),
+      'url: ' + location.href,
+      'ua: ' + navigator.userAgent,
+      'secureContext: ' + window.isSecureContext + '  standalone: ' + (navigator.standalone === true || matchMedia('(display-mode: standalone)').matches),
+      'screen: ' + innerWidth + 'x' + innerHeight + ' dpr ' + devicePixelRatio + ' orientation ' + ((screen.orientation && screen.orientation.type + '/' + screen.orientation.angle) || window.orientation),
+      'apis: mediaDevices=' + !!navigator.mediaDevices + ' getUserMedia=' + !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) +
+        ' DeviceMotionEvent=' + (typeof DeviceMotionEvent !== 'undefined') +
+        ' requestPermission=' + (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') +
+        ' wakeLock=' + ('wakeLock' in navigator),
+      'permissions: camera=' + await permState('camera') + ' accelerometer=' + await permState('accelerometer'),
+      'video: ' + (v ? (v.videoWidth + 'x' + v.videoHeight + ' paused=' + v.paused + ' readyState=' + v.readyState) : 'none'),
+      'track: ' + (tr ? (tr.label + ' state=' + tr.readyState + ' muted=' + tr.muted + ' ' + fmt(settings)) : 'none'),
+      'app: ' + fmt(window.__appState ? window.__appState() : 'not loaded'),
+      '--- log',
+      ...entries
+    ];
+    return lines.join('\n');
+  }
+  async function open(){
+    el('diag-text').value = 'Collecting…'; el('diag').hidden = false;
+    el('diag-text').value = await report();
+  }
+  async function copy(){
+    const ta = el('diag-text'), btn = el('diag-copy');
+    try { await navigator.clipboard.writeText(ta.value); btn.textContent = 'Copied'; }
+    catch {
+      // Clipboard API refused (older iOS, some in-app browsers): select so the user can copy by hand.
+      ta.focus(); ta.select(); ta.setSelectionRange(0, ta.value.length);
+      try { document.execCommand('copy'); btn.textContent = 'Copied'; } catch { btn.textContent = 'Selected, use Copy'; }
+    }
+    setTimeout(() => { btn.textContent = 'Copy'; }, 2500);
+  }
+  window.__diag = { log, fail, open };
+  document.addEventListener('DOMContentLoaded', () => {
+    el('errbar').addEventListener('click', open);
+    el('reportBtn').addEventListener('click', open);
+    el('reportStart').addEventListener('click', open);
+    el('diag-copy').addEventListener('click', copy);
+    el('diag-close').addEventListener('click', () => { el('diag').hidden = true; });
+  });
+  log('loaded');
+})();
+</script>
 
 <div id="start">
   <h1>Wall <span>Leveller</span></h1>
@@ -101,6 +190,7 @@ button:focus-visible{outline:2px solid var(--vial);outline-offset:2px}
   </ol>
   <button id="go" type="button">Start camera &amp; sensors</button>
   <div id="err" role="alert"></div>
+  <button id="reportStart" class="linkbtn" type="button">Problem? Copy a report</button>
   <a id="home" href="/">← sujayraj.com</a>
 </div>
 
@@ -136,7 +226,8 @@ const jitter = [];           // recent roll readings, for steadiness
 // ---------- sensors ----------
 function onMotion(e){
   const a = e.accelerationIncludingGravity;
-  if(!a || a.x === null) return;
+  if(!a || a.x === null){ if(!motionSeen && !onMotion.nullLogged){ onMotion.nullLogged = true; window.__diag && window.__diag.log('devicemotion with null accelerationIncludingGravity'); } return; }
+  if(!motionSeen) window.__diag && window.__diag.log('first motion', {x:+a.x.toFixed(2), y:+a.y.toFixed(2), z:+a.z.toFixed(2), interval:e.interval});
   motionSeen = true;
   const k = 0.12;            // low-pass
   if(!g) g = {x:a.x, y:a.y, z:a.z};
@@ -167,7 +258,7 @@ const browserName = isIOS ? 'Safari' : 'Chrome';
 const goBtn = $('go');
 let stream = null, starting = false, running = false, wakeLock = null;
 
-function showError(html){ $('err').innerHTML = html; }
+function showError(html){ $('err').innerHTML = html; if (html) window.__diag && window.__diag.log('shown error', $('err').textContent); }
 
 function cameraErrorHtml(err){
   const n = err && err.name;
@@ -195,8 +286,8 @@ async function requestMotion(){
   // otherwise the transient activation can be gone and it rejects with NotAllowedError.
   if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function'){
     let r;
-    try { r = await DeviceMotionEvent.requestPermission(); }
-    catch(e){ return {ok:false, html:'<b>Motion access could not be requested</b> (' + e.name + '). Tap Start again.'}; }
+    try { r = await DeviceMotionEvent.requestPermission(); window.__diag && window.__diag.log('motion permission', r); }
+    catch(e){ window.__diag && window.__diag.log('motion permission threw', e.name, e.message); return {ok:false, html:'<b>Motion access could not be requested</b> (' + e.name + '). Tap Start again.'}; }
     if (r !== 'granted') return {ok:false, html:'<b>Motion access was declined.</b> The tilt sensor is what makes the line level. ' + motionHelpHtml().replace(/^<b>[^<]*<\/b>\s*/, '')};
   }
   if (typeof DeviceMotionEvent === 'undefined') return {ok:false, html: motionHelpHtml()};
@@ -224,8 +315,8 @@ async function openCamera(){
   ];
   let lastErr;
   for (const c of attempts){
-    try { stream = await navigator.mediaDevices.getUserMedia(c); break; }
-    catch(e){ lastErr = e; if (e.name === 'NotAllowedError' || e.name === 'SecurityError') throw e; }
+    try { stream = await navigator.mediaDevices.getUserMedia(c); window.__diag && window.__diag.log('camera ok', c.video); break; }
+    catch(e){ window.__diag && window.__diag.log('camera failed', e.name, e.message, c.video); lastErr = e; if (e.name === 'NotAllowedError' || e.name === 'SecurityError') throw e; }
   }
   if (!stream) throw lastErr;
   const track = stream.getVideoTracks()[0];
@@ -237,8 +328,8 @@ async function openCamera(){
 }
 
 async function playVideo(){
-  try { await video.play(); return true; }
-  catch(e){
+  try { await video.play(); window.__diag && window.__diag.log('play ok', video.videoWidth + 'x' + video.videoHeight); return true; }
+  catch(e){ window.__diag && window.__diag.log('play failed', e.name, e.message);
     // Autoplay can still be refused (Low Power Mode on iOS, data saver). A tap on the screen retries.
     return false;
   }
@@ -250,6 +341,7 @@ async function restartCamera(){
 }
 
 function sheetError(html){
+  window.__diag && window.__diag.log('shown sheet', html.replace(/<[^>]+>/g, ''));
   sheet('<h2>Something needs fixing</h2><p>' + html + '</p><div class="row"><button id="sh-retry" class="on">Try again</button><button id="sh-close">Dismiss</button></div>');
   $('sh-close').onclick = closeSheet;
   $('sh-retry').onclick = () => { closeSheet(); location.reload(); };
@@ -261,7 +353,7 @@ async function requestWakeLock(){
 
 async function start(){
   if (starting) return;
-  starting = true; goBtn.disabled = true; goBtn.textContent = 'Starting…'; showError('');
+  window.__diag && window.__diag.log('start tapped'); starting = true; goBtn.disabled = true; goBtn.textContent = 'Starting…'; showError('');
   try{
     if (!window.isSecureContext){ showError('<b>This page must be opened over https://</b> for the camera and sensors to work.'); return; }
     if (inAppBrowser) showError('<b>You seem to be in an in-app browser.</b> If nothing happens, open this link in ' + browserName + ' instead (⋯ menu › Open in browser).');
@@ -286,11 +378,13 @@ async function start(){
 
     // Watchdog: permission granted but no events (Android "Motion sensors" blocked, or no sensor).
     setTimeout(() => { if (!motionSeen) sheetError(motionHelpHtml()); }, 3000);
+    window.__diag && window.__diag.log('started');
   } finally {
     starting = false; goBtn.disabled = false; goBtn.textContent = 'Start camera & sensors';
   }
 }
 goBtn.addEventListener('click', start);
+window.__appState = () => ({ running, motionSeen, gravity: g && {x:+g.x.toFixed(2), y:+g.y.toFixed(2), z:+g.z.toFixed(2)}, roll: g ? +screenLineAngle(g).toFixed(2) : null, calOffset, frozen, mode, anchor: !!anchor, scale: scale && +scale.pxPerCm.toFixed(2) });
 
 // Tab switch / lock screen: browsers release the wake lock and may end the camera track.
 document.addEventListener('visibilitychange', () => {
