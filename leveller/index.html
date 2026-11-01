@@ -6,6 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1110">
 <title>Wall Leveller</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%230d1110%27/%3E%3Crect x=%274%27 y=%2712%27 width=%2724%27 height=%278%27 rx=%274%27 fill=%27none%27 stroke=%27%23c6e83a%27 stroke-width=%272%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%272.5%27 fill=%27%23c6e83a%27/%3E%3C/svg%3E">
 <style>
 /* Layout: full-bleed camera, overlay canvas, HUD strip on top, tool dock at bottom. Single dark look (camera UI). */
 :root{
@@ -17,6 +18,14 @@
   color-scheme:dark;
 }
 *{box-sizing:border-box}
+/* id selectors below set display; without this, el.hidden = true does nothing */
+[hidden]{display:none!important}
+/* iOS Safari cannot focus inputs that inherit user-select:none */
+input{-webkit-user-select:text;user-select:text;touch-action:manipulation}
+#err:empty{display:none}
+#err{background:rgba(255,107,91,.1);border:1px solid rgba(255,107,91,.4);border-radius:12px;padding:12px 14px;line-height:1.45}
+#err b{color:var(--fg)}
+#go:disabled{opacity:.6}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:15px/1.4 var(--sans);overflow:hidden;
   -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:none}
 #stage{position:fixed;inset:0}
@@ -90,8 +99,8 @@ button:focus-visible{outline:2px solid var(--vial);outline-offset:2px}
     <li>Tap the mark on screen. The green line is true horizontal through it.</li>
     <li>Optional: <b>Set scale</b> with a tape measure on the wall so the app can tick the second nail at your spacing.</li>
   </ol>
-  <button id="go">Start camera &amp; sensors</button>
-  <div id="err"></div>
+  <button id="go" type="button">Start camera &amp; sensors</button>
+  <div id="err" role="alert"></div>
   <a id="home" href="/">← sujayraj.com</a>
 </div>
 
@@ -147,34 +156,150 @@ function screenLineAngle(gv){ return norm90(deviceLineAngle(gv) - calOffset + sc
 // How far the phone is tipped toward/away from the wall (0 = perfectly upright).
 function pitchDeg(gv){ const n = Math.hypot(gv.x, gv.y, gv.z) || 1; return Math.asin(Math.min(1, Math.abs(gv.z)/n)) / DEG; }
 
-async function start(){
-  $('err').textContent = '';
-  // iOS needs an explicit permission request from a tap.
-  try{
-    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function'){
-      const r = await DeviceMotionEvent.requestPermission();
-      if (r !== 'granted') throw new Error('Motion access was declined. On iPhone: Settings › Safari › Motion & Orientation Access, then reload.');
-    }
-  }catch(err){ $('err').textContent = err.message || String(err); return; }
-  window.addEventListener('devicemotion', onMotion);
+// ---------- platform ----------
+const UA = navigator.userAgent;
+const isIOS = /iPhone|iPad|iPod/.test(UA) || (/Macintosh/.test(UA) && navigator.maxTouchPoints > 1);
+const isAndroid = /Android/.test(UA);
+// In-app browsers (Instagram, Facebook, Gmail, LinkedIn, WhatsApp preview…) often block camera or sensors.
+const inAppBrowser = /FBAN|FBAV|Instagram|Line\/|GSA\/|LinkedInApp|Twitter|MicroMessenger|; wv\)/.test(UA);
+const browserName = isIOS ? 'Safari' : 'Chrome';
 
-  if (!window.isSecureContext){ $('err').textContent = 'This page must be opened over https:// for the camera to work.'; return; }
-  try{
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio:false,
-      video:{ facingMode:{ideal:'environment'}, width:{ideal:1920}, height:{ideal:1080} }
-    });
-    video.srcObject = stream;
-    await video.play();
-  }catch(err){
-    $('err').textContent = 'Camera unavailable: ' + (err.message || err.name) + '. Allow camera access for this site and reload.';
-    return;
+const goBtn = $('go');
+let stream = null, starting = false, running = false, wakeLock = null;
+
+function showError(html){ $('err').innerHTML = html; }
+
+function cameraErrorHtml(err){
+  const n = err && err.name;
+  if (n === 'NotAllowedError' || n === 'SecurityError'){
+    return isIOS
+      ? '<b>Camera access is blocked for this site.</b> Tap <b>aA</b> in the address bar › Website Settings › Camera › Allow, then tap Start again.'
+      : '<b>Camera access is blocked for this site.</b> Tap the icon left of the address › Permissions › Camera › Allow, then reload.';
   }
-  try{ if ('wakeLock' in navigator) await navigator.wakeLock.request('screen'); }catch{}
-  $('start').hidden = true;
-  setTimeout(() => { if(!motionSeen) toast('No motion sensor data yet. This needs a phone; desktop browsers have no tilt sensor.', 'warn'); }, 2500);
+  if (n === 'NotReadableError' || n === 'TrackStartError' || n === 'AbortError')
+    return '<b>The camera is busy.</b> Close other apps or tabs using it (video calls, the Camera app) and tap Start again.';
+  if (n === 'NotFoundError' || n === 'DevicesNotFoundError' || n === 'OverconstrainedError')
+    return '<b>No usable camera was found</b> on this device.';
+  return '<b>The camera could not start</b> (' + (n || 'error') + ': ' + ((err && err.message) || '') + ').';
 }
-$('go').addEventListener('click', start);
+
+function motionHelpHtml(){
+  if (isIOS) return '<b>No tilt data from the phone.</b> Reload the page and tap <b>Allow</b> on the Motion &amp; Orientation prompt. If it no longer asks: Settings › Apps › Safari › Advanced › Website Data, delete this site, then reload.';
+  if (isAndroid) return '<b>No tilt data from the phone.</b> Tap the icon left of the address › Permissions › <b>Motion sensors</b> › Allow, then reload. Samsung Internet: Settings › Sites and downloads › Site permissions.';
+  return '<b>No tilt sensor on this device.</b> Open this page on a phone.';
+}
+
+async function requestMotion(){
+  // MDN: DeviceMotionEvent.requestPermission() exists only on iOS/iPadOS 13+ Safari & WebKit,
+  // and must be called from a user gesture. It must be the FIRST async call in the click handler,
+  // otherwise the transient activation can be gone and it rejects with NotAllowedError.
+  if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function'){
+    let r;
+    try { r = await DeviceMotionEvent.requestPermission(); }
+    catch(e){ return {ok:false, html:'<b>Motion access could not be requested</b> (' + e.name + '). Tap Start again.'}; }
+    if (r !== 'granted') return {ok:false, html:'<b>Motion access was declined.</b> The tilt sensor is what makes the line level. ' + motionHelpHtml().replace(/^<b>[^<]*<\/b>\s*/, '')};
+  }
+  if (typeof DeviceMotionEvent === 'undefined') return {ok:false, html: motionHelpHtml()};
+  window.removeEventListener('devicemotion', onMotion);
+  window.addEventListener('devicemotion', onMotion);
+  return {ok:true};
+}
+
+function stopStream(){
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null;
+}
+
+async function openCamera(){
+  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function'){
+    throw Object.assign(new Error('getUserMedia unavailable'), {name:'NoMediaDevices'});
+  }
+  stopStream();
+  // Prefer the rear camera. ideal (not exact) so it never fails with OverconstrainedError;
+  // then retry with the bare minimum in case a device rejects the resolution hints.
+  const attempts = [
+    {audio:false, video:{facingMode:{ideal:'environment'}, width:{ideal:1920}, height:{ideal:1080}}},
+    {audio:false, video:{facingMode:{ideal:'environment'}}},
+    {audio:false, video:true}
+  ];
+  let lastErr;
+  for (const c of attempts){
+    try { stream = await navigator.mediaDevices.getUserMedia(c); break; }
+    catch(e){ lastErr = e; if (e.name === 'NotAllowedError' || e.name === 'SecurityError') throw e; }
+  }
+  if (!stream) throw lastErr;
+  const track = stream.getVideoTracks()[0];
+  track.addEventListener('ended', () => { if (running && !document.hidden) restartCamera(); });
+  video.muted = true; video.setAttribute('muted', ''); video.setAttribute('playsinline', '');
+  video.srcObject = stream;
+  const facing = track.getSettings ? track.getSettings().facingMode : undefined;
+  return {facing};
+}
+
+async function playVideo(){
+  try { await video.play(); return true; }
+  catch(e){
+    // Autoplay can still be refused (Low Power Mode on iOS, data saver). A tap on the screen retries.
+    return false;
+  }
+}
+
+async function restartCamera(){
+  try { await openCamera(); if (!(await playVideo())) setHint('Tap the screen to resume the camera.'); }
+  catch(e){ sheetError(cameraErrorHtml(e)); }
+}
+
+function sheetError(html){
+  sheet('<h2>Something needs fixing</h2><p>' + html + '</p><div class="row"><button id="sh-retry" class="on">Try again</button><button id="sh-close">Dismiss</button></div>');
+  $('sh-close').onclick = closeSheet;
+  $('sh-retry').onclick = () => { closeSheet(); location.reload(); };
+}
+
+async function requestWakeLock(){
+  try { if ('wakeLock' in navigator && !document.hidden) { wakeLock = await navigator.wakeLock.request('screen'); } } catch {}
+}
+
+async function start(){
+  if (starting) return;
+  starting = true; goBtn.disabled = true; goBtn.textContent = 'Starting…'; showError('');
+  try{
+    if (!window.isSecureContext){ showError('<b>This page must be opened over https://</b> for the camera and sensors to work.'); return; }
+    if (inAppBrowser) showError('<b>You seem to be in an in-app browser.</b> If nothing happens, open this link in ' + browserName + ' instead (⋯ menu › Open in browser).');
+
+    const m = await requestMotion();          // first await: keeps the iOS user-gesture requirement
+    if (!m.ok){ showError(m.html); return; }
+
+    let cam;
+    try { cam = await openCamera(); }
+    catch(e){
+      showError(e.name === 'NoMediaDevices'
+        ? '<b>This browser does not allow camera access here.</b> Open the link in ' + browserName + ' directly.'
+        : cameraErrorHtml(e));
+      return;
+    }
+    $('start').hidden = true;                // fixed: [hidden] rule above makes this actually hide it
+    running = true;
+    const played = await playVideo();
+    setHint(played ? undefined : 'Tap the screen to start the camera preview.');
+    if (cam.facing === 'user') sheetError('<b>Only the front camera is available.</b> The line will be wrong with a selfie camera because its image is mirrored relative to the phone. Use a phone with a rear camera.');
+    requestWakeLock();
+
+    // Watchdog: permission granted but no events (Android "Motion sensors" blocked, or no sensor).
+    setTimeout(() => { if (!motionSeen) sheetError(motionHelpHtml()); }, 3000);
+  } finally {
+    starting = false; goBtn.disabled = false; goBtn.textContent = 'Start camera & sensors';
+  }
+}
+goBtn.addEventListener('click', start);
+
+// Tab switch / lock screen: browsers release the wake lock and may end the camera track.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden || !running) return;
+  requestWakeLock();
+  const t = stream && stream.getVideoTracks()[0];
+  if (!t || t.readyState === 'ended') restartCamera();
+  else if (video.paused && !frozen) playVideo();
+});
 
 // ---------- canvas sizing ----------
 function resize(){
@@ -188,6 +313,7 @@ addEventListener('resize', resize); resize();
 // ---------- pointer: tap places, drag nudges (so your finger doesn't hide the mark) ----------
 let drag = null;
 overlay.addEventListener('pointerdown', e => {
+  if (running && video.paused && !frozen) { playVideo().then(ok => ok && setHint()); }
   const p = {x:e.clientX, y:e.clientY};
   if (mode === 'scale1' || mode === 'scale2'){ scaleTap(p); return; }
   if (mode !== 'anchor') return;
@@ -249,7 +375,7 @@ $('freezeBtn').addEventListener('click', () => {
   frozen = !frozen;
   if (frozen){ if(!g) { frozen = false; toast('Waiting for sensor data.', 'warn'); return; }
     gFrozen = {...g}; drawStill(); still.hidden = false; video.pause(); }
-  else { still.hidden = true; video.play(); gFrozen = null; }
+  else { still.hidden = true; playVideo(); gFrozen = null; }
   $('freezeBtn').classList.toggle('on', frozen);
   $('freezeBtn').textContent = frozen ? 'Live' : 'Freeze';
   setHint();
@@ -329,7 +455,7 @@ function frame(){
     const mean = jitter.reduce((a,b)=>a+b,0)/jitter.length;
     const sd = Math.sqrt(jitter.reduce((a,b)=>a+(b-mean)**2,0)/jitter.length);
 
-    $('tilt').innerHTML = `${(-ang).toFixed(1)}°<small>phone roll</small>`;
+    $('tilt').innerHTML = `${ang.toFixed(1)}°<small>phone roll</small>`;
     const pc = pitch < 8 ? 'ok' : pitch < 20 ? 'warn' : 'bad';
     const sc = frozen ? 'ok' : sd < 0.15 ? 'ok' : sd < 0.5 ? 'warn' : 'bad';
     $('status').innerHTML =
@@ -347,8 +473,11 @@ function frame(){
     if (anchor){
       const a = anchor;
       // full-length level line through the anchor
-      ctx.lineWidth = 2; ctx.strokeStyle = '#c6e83a'; ctx.shadowColor = 'rgba(0,0,0,.7)'; ctx.shadowBlur = 3;
-      ctx.beginPath(); ctx.moveTo(a.x-ux*L, a.y-uy*L); ctx.lineTo(a.x+ux*L, a.y+uy*L); ctx.stroke();
+      // dark casing under a bright core: readable on any wall colour
+      ctx.beginPath(); ctx.moveTo(a.x-ux*L, a.y-uy*L); ctx.lineTo(a.x+ux*L, a.y+uy*L);
+      ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(0,0,0,.75)'; ctx.stroke();
+      ctx.lineWidth = 2; ctx.strokeStyle = '#c6e83a'; ctx.stroke();
+      ctx.shadowColor = 'rgba(0,0,0,.7)'; ctx.shadowBlur = 3;
       // perpendicular (true vertical) tick helper
       const vx = -uy, vy = ux;
       const tick = (p, len, label, color) => {
